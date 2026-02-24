@@ -1,193 +1,170 @@
+# ==========================================
+# 🎓 STREAMLIT YOUTUBE RAG APP
+# ==========================================
+
+import streamlit as st
 import os
 import re
-import subprocess
-import streamlit as st
-import tiktoken
+import pysrt
+import nltk
+from youtube_transcript_api import YouTubeTranscriptApi
+from transformers import BertTokenizer
 from sqlalchemy import create_engine, text
 from openai import OpenAI
 
-# ============================================================
-# 🔐 LOAD SECRETS (Streamlit Cloud + Local Compatible)
-# ============================================================
+nltk.download("punkt")
 
-OPENAI_API_KEY = None
-DB_URL = None
+st.set_page_config(page_title="YouTube RAG", layout="wide")
 
-# Streamlit Cloud secrets
-if "OPENAI_API_KEY" in st.secrets:
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    DB_URL = st.secrets["DB_URL"]
+st.title("🎥 YouTube RAG System")
+st.write("Ask questions based on a YouTube video or uploaded transcript.")
 
-# Local .env fallback
-else:
-    from dotenv import load_dotenv
-    load_dotenv()
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    DB_URL = os.getenv("DB_URL")
+# ==========================================
+# 🔐 LOAD SECRETS
+# ==========================================
 
-if not OPENAI_API_KEY or not DB_URL:
-    st.error("Missing OPENAI_API_KEY or DB_URL")
-    st.stop()
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+SUPABASE_DB_PASSWORD = st.secrets["SUPABASE_DB_PASSWORD"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-engine = create_engine(DB_URL)
 
-# ============================================================
+DB_URL = (
+    "postgresql://"
+    "postgres.vvjsolwiuggknssusjfl:"
+    f"{SUPABASE_DB_PASSWORD}"
+    "@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres"
+)
+
+engine = create_engine(DB_URL, pool_pre_ping=True)
+
+# ==========================================
 # 🗄 INIT DATABASE
-# ============================================================
+# ==========================================
 
-def init_db():
-    with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS video_chunks (
-                id SERIAL PRIMARY KEY,
-                video_id TEXT,
-                chunk_text TEXT,
-                embedding VECTOR(1536),
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-        """))
-        conn.commit()
+with engine.connect() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS video_chunks (
+            id SERIAL PRIMARY KEY,
+            video_id TEXT,
+            chunk_text TEXT,
+            start_time FLOAT,
+            embedding VECTOR(1536)
+        );
+    """))
+    conn.commit()
 
-init_db()
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-# ============================================================
-# 🎬 UTILITIES
-# ============================================================
+# ==========================================
+# 🧠 FUNCTIONS
+# ==========================================
 
-def extract_video_id(url):
-    pattern = r"(?:v=|youtu.be/)([^&]+)"
-    match = re.search(pattern, url)
-    if not match:
-        raise ValueError("Invalid YouTube URL")
-    return match.group(1)
+def embed_text(text_input):
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text_input
+    )
+    return response.data[0].embedding
 
-def download_audio(url, output="audio.mp3"):
-    subprocess.run([
-        "yt-dlp",
-        "-x",
-        "--audio-format", "mp3",
-        "-o", output,
-        url
-    ], check=True)
-    return output
-
-def transcribe_audio(file_path):
-    with open(file_path, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=audio_file
-        )
-    return transcript.text
-
-def chunk_text(text, max_tokens=400):
-    enc = tiktoken.encoding_for_model("text-embedding-3-small")
-    sentences = text.split(". ")
-
+def create_chunks(transcript, max_tokens=512):
     chunks = []
-    current = []
-    token_count = 0
+    current_text = []
+    current_tokens = 0
+    chunk_start = None
 
-    for sentence in sentences:
-        tokens = len(enc.encode(sentence))
-        if token_count + tokens > max_tokens:
-            chunks.append(" ".join(current))
-            current = []
-            token_count = 0
-        current.append(sentence)
-        token_count += tokens
+    for segment in transcript:
+        sentence = segment["text"]
+        start_time = segment["start"]
 
-    if current:
-        chunks.append(" ".join(current))
+        tokens = tokenizer.encode(sentence, add_special_tokens=False)
+        token_count = len(tokens)
+
+        if current_tokens + token_count > max_tokens:
+            chunks.append({
+                "text": " ".join(current_text),
+                "start_time": chunk_start
+            })
+            current_text = []
+            current_tokens = 0
+            chunk_start = None
+
+        if chunk_start is None:
+            chunk_start = start_time
+
+        current_text.append(sentence)
+        current_tokens += token_count
+
+    if current_text:
+        chunks.append({
+            "text": " ".join(current_text),
+            "start_time": chunk_start
+        })
 
     return chunks
 
-def create_embeddings_batch(text_list):
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text_list
-    )
-    return [item.embedding for item in response.data]
-
-# ============================================================
-# 📦 INGEST VIDEO
-# ============================================================
-
-def ingest_video(youtube_url):
-
-    video_id = extract_video_id(youtube_url)
+def store_chunks(video_id, transcript):
 
     with engine.connect() as conn:
-        exists = conn.execute(
+        existing = conn.execute(
             text("SELECT COUNT(*) FROM video_chunks WHERE video_id = :vid"),
             {"vid": video_id}
-        ).scalar()
+        ).fetchone()
 
-    if exists > 0:
-        return video_id, "Video already ingested."
+    if existing[0] > 0:
+        return
 
-    audio_file = download_audio(youtube_url)
-    transcript_text = transcribe_audio(audio_file)
-    chunks = chunk_text(transcript_text)
-    embeddings = create_embeddings_batch(chunks)
+    chunks = create_chunks(transcript)
 
     with engine.connect() as conn:
-        for chunk, emb in zip(chunks, embeddings):
-            conn.execute(
-                text("""
-                    INSERT INTO video_chunks (video_id, chunk_text, embedding)
-                    VALUES (:video_id, :chunk_text, :embedding)
-                """),
-                {
-                    "video_id": video_id,
-                    "chunk_text": chunk,
-                    "embedding": emb
-                }
-            )
+        for chunk in chunks:
+            embedding = embed_text(chunk["text"])
+            conn.execute(text("""
+                INSERT INTO video_chunks
+                (video_id, chunk_text, start_time, embedding)
+                VALUES (:vid, :text, :start, :embedding)
+            """), {
+                "vid": video_id,
+                "text": chunk["text"],
+                "start": chunk["start_time"],
+                "embedding": embedding
+            })
         conn.commit()
 
-    # Clean up audio file
-    if os.path.exists(audio_file):
-        os.remove(audio_file)
+def answer_question(question, threshold=0.5):
 
-    return video_id, f"Ingested {len(chunks)} chunks."
+    query_embedding = embed_text(question)
 
-# ============================================================
-# 🔎 RAG QUESTION ANSWERING
-# ============================================================
-
-def answer_question(video_id, question, threshold=0.5):
-
-    q_embedding = create_embeddings_batch([question])[0]
-
-    query_sql = """
-    SELECT chunk_text,
+    sql = """
+    SELECT video_id, chunk_text, start_time,
            embedding <-> CAST(:embedding AS vector) AS distance
     FROM video_chunks
-    WHERE video_id = :video_id
     ORDER BY embedding <-> CAST(:embedding AS vector)
-    LIMIT 5;
+    LIMIT 3;
     """
 
     with engine.connect() as conn:
-        results = conn.execute(
-            text(query_sql),
-            {"embedding": q_embedding, "video_id": video_id}
-        ).fetchall()
+        results = conn.execute(text(sql), {
+            "embedding": query_embedding
+        }).fetchall()
 
     if not results:
         return "No relevant data found."
 
-    if results[0][1] > threshold:
-        return "Question not relevant to this video."
+    if results[0][3] > threshold:
+        return "Question is irrelevant"
 
-    context = "\n".join([row[0] for row in results])
+    video_id = results[0][0]
+    start_time = int(results[0][2])
+    link = f"https://www.youtube.com/watch?v={video_id}&t={start_time}"
+
+    context = "\n".join([r[1] for r in results])
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-mini",
         input=f"""
 Answer ONLY using the context below.
+If not found, say "Question is irrelevant".
 
 Context:
 {context}
@@ -197,34 +174,58 @@ Question:
 """
     )
 
-    return response.output_text
+    return f"""
+Timestamp: {start_time}s  
+Watch: {link}
 
-# ============================================================
-# 🎨 STREAMLIT UI
-# ============================================================
+Answer:
+{response.output_text}
+"""
 
-st.title("🎥 YouTube RAG Assistant")
+# ==========================================
+# 🎥 INPUT SECTION
+# ==========================================
 
-youtube_url = st.text_input("Enter YouTube URL")
+option = st.radio("Select Input Type", ["YouTube URL", "Upload SRT"])
 
-if st.button("Ingest Video"):
-    if youtube_url:
-        with st.spinner("Processing video..."):
-            try:
-                vid, msg = ingest_video(youtube_url)
-                st.session_state["video_id"] = vid
-                st.success(msg)
-            except Exception as e:
-                st.error(f"Error: {e}")
+video_id = None
 
-if "video_id" in st.session_state:
-    st.subheader("Ask Questions")
-    question = st.text_input("Enter your question")
+if option == "YouTube URL":
+    url = st.text_input("Enter YouTube URL")
+    if st.button("Ingest Video") and url:
+        video_id = re.search(r"(?:v=|youtu.be/)([^&]+)", url).group(1)
+        transcript_obj = YouTubeTranscriptApi().fetch(video_id)
+        transcript = [{"text": t.text, "start": t.start} for t in transcript_obj]
+        store_chunks(video_id, transcript)
+        st.success("Video ingested successfully!")
 
-    if st.button("Get Answer"):
-        with st.spinner("Generating answer..."):
-            try:
-                answer = answer_question(st.session_state["video_id"], question)
-                st.write(answer)
-            except Exception as e:
-                st.error(f"Error: {e}")
+else:
+    uploaded_file = st.file_uploader("Upload SRT file", type=["srt"])
+    if uploaded_file and st.button("Ingest Transcript"):
+        subs = pysrt.from_string(uploaded_file.read().decode("utf-8"))
+        transcript = []
+        for sub in subs:
+            start_seconds = (
+                sub.start.hours * 3600 +
+                sub.start.minutes * 60 +
+                sub.start.seconds
+            )
+            transcript.append({
+                "text": sub.text.replace("\n", " "),
+                "start": start_seconds
+            })
+
+        video_id = uploaded_file.name.replace(".srt", "")
+        store_chunks(video_id, transcript)
+        st.success("Transcript ingested successfully!")
+
+# ==========================================
+# 💬 QUESTION SECTION
+# ==========================================
+
+question = st.text_input("Ask a question")
+
+if st.button("Get Answer") and question:
+    with st.spinner("Generating answer..."):
+        answer = answer_question(question)
+        st.markdown(answer)
