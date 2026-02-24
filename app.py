@@ -1,9 +1,8 @@
 # ==========================================
-# 🎓 STREAMLIT YOUTUBE RAG APP
+# 🎓 FINAL EXAM READY — STREAMLIT RAG APP
 # ==========================================
 
 import streamlit as st
-import os
 import re
 import pysrt
 import nltk
@@ -14,8 +13,11 @@ from openai import OpenAI
 
 nltk.download("punkt")
 
-st.set_page_config(page_title="YouTube RAG", layout="wide")
+# ==========================================
+# 🎨 PAGE CONFIG
+# ==========================================
 
+st.set_page_config(page_title="YouTube RAG System", layout="wide")
 st.title("🎥 YouTube RAG System")
 st.write("Ask questions based on a YouTube video or uploaded transcript.")
 
@@ -28,17 +30,26 @@ SUPABASE_DB_PASSWORD = st.secrets["SUPABASE_DB_PASSWORD"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ==========================================
+# 🔌 SUPABASE CONNECTION (TRANSACTION POOLER)
+# ==========================================
+
 DB_URL = (
-    "postgresql://"
+    "postgresql+psycopg2://"
     "postgres.vvjsolwiuggknssusjfl:"
     f"{SUPABASE_DB_PASSWORD}"
     "@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres"
+    "?sslmode=require"
 )
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
+engine = create_engine(
+    DB_URL,
+    pool_pre_ping=True,
+    pool_recycle=300
+)
 
 # ==========================================
-# 🗄 INIT DATABASE
+# 🗄 CREATE TABLE
 # ==========================================
 
 with engine.connect() as conn:
@@ -54,10 +65,14 @@ with engine.connect() as conn:
     """))
     conn.commit()
 
+# ==========================================
+# 🧠 TOKENIZER
+# ==========================================
+
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 # ==========================================
-# 🧠 FUNCTIONS
+# 🧠 EMBEDDING FUNCTION
 # ==========================================
 
 def embed_text(text_input):
@@ -66,6 +81,10 @@ def embed_text(text_input):
         input=text_input
     )
     return response.data[0].embedding
+
+# ==========================================
+# ✂ TOKEN-AWARE CHUNKING (≤512)
+# ==========================================
 
 def create_chunks(transcript, max_tokens=512):
     chunks = []
@@ -103,6 +122,10 @@ def create_chunks(transcript, max_tokens=512):
 
     return chunks
 
+# ==========================================
+# 📦 STORE CHUNKS
+# ==========================================
+
 def store_chunks(video_id, transcript):
 
     with engine.connect() as conn:
@@ -130,6 +153,10 @@ def store_chunks(video_id, transcript):
                 "embedding": embedding
             })
         conn.commit()
+
+# ==========================================
+# 🔎 RETRIEVAL + ANSWER
+# ==========================================
 
 def answer_question(question, threshold=0.5):
 
@@ -175,10 +202,10 @@ Question:
     )
 
     return f"""
-Timestamp: {start_time}s  
-Watch: {link}
+**Timestamp:** {start_time}s  
+**Watch:** {link}
 
-Answer:
+**Answer:**
 {response.output_text}
 """
 
@@ -187,8 +214,6 @@ Answer:
 # ==========================================
 
 option = st.radio("Select Input Type", ["YouTube URL", "Upload SRT"])
-
-video_id = None
 
 if option == "YouTube URL":
     url = st.text_input("Enter YouTube URL")
@@ -214,7 +239,6 @@ else:
                 "text": sub.text.replace("\n", " "),
                 "start": start_seconds
             })
-
         video_id = uploaded_file.name.replace(".srt", "")
         store_chunks(video_id, transcript)
         st.success("Transcript ingested successfully!")
