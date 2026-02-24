@@ -1,8 +1,10 @@
 streamlit
+youtube-transcript-api
+nltk
+transformers
 openai
-yt-dlp
-tiktoken
 sqlalchemy
 psycopg2-binary
 pgvector
-python-dotenv
+torch
+pysrt
