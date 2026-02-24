@@ -1,0 +1,8 @@
+streamlit
+openai
+yt-dlp
+tiktoken
+sqlalchemy
+psycopg2-binary
+pgvector
+python-dotenv
