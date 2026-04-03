@@ -20,7 +20,7 @@ load_dotenv()
 # ============================================================
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DB_URL = os.getenv("DATABASE_URL")
+DB_URL = os.getenv("DB_URL")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 engine = create_engine(DB_URL)
