@@ -1,0 +1,18 @@
+[project]
+name = "rag-youtube-api"
+version = "1.0.0"
+description = "Production-grade RAG pipeline with strict irrelevance handling"
+authors = [{name = "Ankit Tiwari"}]
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "psycopg2-binary",
+    "openai",
+    "transformers",
+    "nltk",
+    "pypdf",
+    "python-dotenv"
+]
