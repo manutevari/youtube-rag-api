@@ -1,10 +1,8 @@
 streamlit
 youtube-transcript-api
 nltk
-transformers
 openai
 sqlalchemy
 psycopg2-binary
 pgvector
 pysrt
-torch
