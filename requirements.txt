@@ -1,8 +1,0 @@
-streamlit
-youtube-transcript-api
-nltk
-openai
-sqlalchemy
-psycopg2-binary
-pgvector
-pysrt
