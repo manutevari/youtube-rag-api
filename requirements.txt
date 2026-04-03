@@ -6,5 +6,4 @@ openai
 sqlalchemy
 psycopg2-binary
 pgvector
-torch
 pysrt
